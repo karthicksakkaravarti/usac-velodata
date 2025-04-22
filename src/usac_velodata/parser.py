@@ -868,7 +868,7 @@ class EventDetailsParser(BaseParser):
         """
         # Fetch the permit page HTML
         html = self.fetch_permit_page(permit)
-
+        
         # Parse HTML with BeautifulSoup
         soup = self._make_soup(html)
 
@@ -887,99 +887,128 @@ class EventDetailsParser(BaseParser):
             # Default to current year if not found
             event_details["year"] = datetime.now().year
 
-        # Extract event name, dates, and location
-        event_header = soup.select_one("#pgcontent h3")
-        if event_header and event_header.get_text(strip=True):
-            header_text = event_header.get_text(strip=True)
+        # Check if this is a direct loadInfoID scenario (single discipline event)
+        script_tags = soup.select("#resultsmain script")
+        disciplines = []
+        direct_load_info_id = None
+        
+        for script in script_tags:
+            script_content = script.string
+            if script_content and "loadInfoID" in script_content:
+                info_id_match = re.search(r"loadInfoID\((\d+)", script_content)
+                if info_id_match:
+                    direct_load_info_id = info_id_match.group(1)
+                    # This is a single discipline event with direct loading
+                    disciplines.append({
+                        "load_info_id": direct_load_info_id,
+                        "discipline": "Unknown Discipline",  # We don't have the name in this case
+                        "race_date": ""
+                    })
+                    break
+        
+        # If we didn't find a direct loadInfoID, look for the event header and disciplines table
+        if not direct_load_info_id:
+            # Extract event name, dates, and location
+            event_header = soup.select_one("#pgcontent h3")
+            if event_header and event_header.get_text(strip=True):
+                header_text = event_header.get_text(strip=True)
 
-            # Split by <br/> tags to get separate lines
-            header_lines = []
-            if event_header.contents:
-                current_line = ""
-                for content in event_header.contents:
-                    if content.name == "br":
+                # Split by <br/> tags to get separate lines
+                header_lines = []
+                if event_header.contents:
+                    current_line = ""
+                    for content in event_header.contents:
+                        if content.name == "br":
+                            header_lines.append(current_line.strip())
+                            current_line = ""
+                        else:
+                            current_line += str(content)
+                    if current_line.strip():
                         header_lines.append(current_line.strip())
-                        current_line = ""
-                    else:
-                        current_line += str(content)
-                if current_line.strip():
-                    header_lines.append(current_line.strip())
 
-            # If we couldn't extract using br tags, try splitting by newlines
-            if not header_lines:
-                header_lines = [line.strip() for line in header_text.split("\n") if line.strip()]
+                # If we couldn't extract using br tags, try splitting by newlines
+                if not header_lines:
+                    header_lines = [line.strip() for line in header_text.split("\n") if line.strip()]
 
-            if len(header_lines) >= 1:
-                event_details["name"] = header_lines[0]
+                if len(header_lines) >= 1:
+                    event_details["name"] = header_lines[0]
 
-            if len(header_lines) >= 2:
-                location_parts = header_lines[1].split(",")
-                if len(location_parts) >= 2:
-                    event_details["location"] = location_parts[0].strip()
-                    state_part = location_parts[1].strip()
-                    # Extract the state abbreviation (2 letters)
-                    state_match = re.search(r"\b([A-Z]{2})\b", state_part)
-                    if state_match:
-                        event_details["state"] = state_match.group(1)
-                    else:
-                        event_details["state"] = ""
+                if len(header_lines) >= 2:
+                    location_parts = header_lines[1].split(",")
+                    if len(location_parts) >= 2:
+                        event_details["location"] = location_parts[0].strip()
+                        state_part = location_parts[1].strip()
+                        # Extract the state abbreviation (2 letters)
+                        state_match = re.search(r"\b([A-Z]{2})\b", state_part)
+                        if state_match:
+                            event_details["state"] = state_match.group(1)
+                        else:
+                            event_details["state"] = ""
 
-            if len(header_lines) >= 3:
-                # Parse date range: "Dec 2, 2020 - Dec 30, 2020"
-                date_text = header_lines[2]
-                dates = re.findall(r"([A-Za-z]+ \d+, \d{4})", date_text)
+                if len(header_lines) >= 3:
+                    # Parse date range: "Dec 2, 2020 - Dec 30, 2020"
+                    date_text = header_lines[2]
+                    dates = re.findall(r"([A-Za-z]+ \d+, \d{4})", date_text)
 
-                if len(dates) >= 1:
-                    start_date = self._extract_date(dates[0])
-                    if start_date:
-                        event_details["start_date"] = start_date
+                    if len(dates) >= 1:
+                        start_date = self._extract_date(dates[0])
+                        if start_date:
+                            event_details["start_date"] = start_date
 
-                if len(dates) >= 2:
-                    end_date = self._extract_date(dates[1])
-                    if end_date:
-                        event_details["end_date"] = end_date
-                elif "start_date" in event_details:
-                    # If only one date is found, use it for both start and end dates
-                    event_details["end_date"] = event_details["start_date"]
+                    if len(dates) >= 2:
+                        end_date = self._extract_date(dates[1])
+                        if end_date:
+                            event_details["end_date"] = end_date
+                    elif "start_date" in event_details:
+                        # If only one date is found, use it for both start and end dates
+                        event_details["end_date"] = event_details["start_date"]
 
-        # Extract disciplines
-        disciplines = list()
-        discipline_links = soup.select('a[onclick^="loadInfoID"]')
+            # Extract disciplines from the discipline table
+            discipline_links = soup.select('a[onclick^="loadInfoID"]')
 
-        for link in discipline_links:
-            # Extract info_id and date from onclick attribute
-            onclick = link.get("onclick", "")
-            info_id_match = re.search(r"loadInfoID\((\d+)", onclick)
-            date_match = re.search(r"\d{2}/\d{2}/\d{4}", onclick)
+            for link in discipline_links:
+                # Extract info_id and date from onclick attribute
+                onclick = link.get("onclick", "")
+                info_id_match = re.search(r"loadInfoID\((\d+)", onclick)
+                date_match = re.search(r"\d{2}/\d{2}/\d{4}", onclick)
 
-            discipline_text = self._extract_text(link)
-            if discipline_text:
-                # Clean up the discipline name (remove date if present)
-                clean_discipline = re.sub(r"\s+\d{2}/\d{2}/\d{4}$", "", discipline_text)
+                discipline_text = self._extract_text(link)
+                if discipline_text:
+                    # Clean up the discipline name (remove date if present)
+                    clean_discipline = re.sub(r"\s+\d{2}/\d{2}/\d{4}$", "", discipline_text)
 
-                # Extract race date if present
-                clean_race_date = date_match.group(0) if date_match else ""
+                    # Extract race date if present
+                    clean_race_date = date_match.group(0) if date_match else ""
 
-                # Extract load_info_id
-                load_info_id = info_id_match.group(1) if info_id_match else ""
+                    # Extract load_info_id
+                    load_info_id = info_id_match.group(1) if info_id_match else ""
 
-                disciplines.append(
-                    {"load_info_id": load_info_id, "discipline": clean_discipline, "race_date": clean_race_date}
-                )
+                    disciplines.append(
+                        {"load_info_id": load_info_id, "discipline": clean_discipline, "race_date": clean_race_date}
+                    )
+        
+        # If we have a direct load info ID but no disciplines yet, fetch the disciplines
+        # This will be handled by the categories section
 
         event_details["disciplines"] = list(disciplines)
 
-        # Extract categories - will require additional API calls in a future implementation
-        # For now, we'll leave it as an empty list
+        # Extract categories - we'll need to make API calls
         event_details["categories"] = []
         race_result_parser = RaceResultsParser()
+        
         for discipline in disciplines:
+            # For direct load case, we need to provide both info_id and label
+            label = discipline.get("discipline", "")
+            if direct_load_info_id:
+                label = ""  # Direct load doesn't need a label
+                
             event_details["categories"].append(
                 {
                     "load_info_id": discipline.get("load_info_id", ""),
-                    "categories": race_result_parser.parse_race_categories(discipline.get("load_info_id", ""), ""),
+                    "categories": race_result_parser.parse_race_categories(discipline.get("load_info_id", ""), label),
                 }
             )
+            
         # Set default values for fields that might not be extracted
         defaults = {
             "name": f"Event {permit}",
